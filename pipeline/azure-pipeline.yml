@@ -1,0 +1,114 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+trigger:
+  branches:
+    include:
+    - master
+    - release/*
+    - feature/*
+    - bugfix/*
+    - hotfix/*
+    exclude:
+    - release/old*
+    - backup/*
+    - feature/*-working
+  paths:
+    include:
+    - '*' # same as '/' for the repository root
+    exclude:
+    - 'docs/*' # same as 'docs/'
+    - 'pipeline/*'
+    - 'data/*'
+    - 'config/*'
+pr:
+  branches:
+    include:
+      - master
+      - integration
+      - hotfix
+      - qa
+      - sit
+      - uat
+    exclude:
+      - releases/old*
+      - releases/*
+      - feature/*-working
+      - feature/*
+
+pool:
+  vmImage: ubuntu-latest
+  
+jobs:
+- job: perform_validation
+  displayName: Validation against Salesforce Org
+  steps:
+    # Install SFDX
+    - script: |
+        wget https://developer.salesforce.com/media/salesforce-cli/sfdx-linux-amd64.tar.xz
+        mkdir sfdx-cli
+        tar xJf sfdx-linux-amd64.tar.xz -C sfdx-cli --strip-components 1
+          ./sfdx-cli/install
+      displayName: 'Install Salesforce SFDX CLI'
+
+    # Install Salesforce CLI Scanner
+    - script: 
+        sfdx plugins:install @salesforce/sfdx-scanner
+      displayName: 'Install Salesforce CLI Scanner'
+
+    - script: |
+        sfdx force:auth:jwt:grant --clientid $(salesforceDevOrgClientId) --jwtkeyfile server.key --username $(salesforceDevOrgUserName) --instanceurl $(salesforceDevOrgInstanceURL) -a devOrg
+      displayName: Authorize salesforce org
+    
+    - script: |
+        sfdx force:source:convert -r ./force-app -d ./toDeploy
+      displayName: Convert to deploy source
+    - script: |
+        sfdx force:mdapi:deploy -l NoTestRun -c -d ./toDeploy -u devOrg -w 10
+      displayName: Run validation on source code
+    - script: |
+        sfdx force:mdapi:deploy -l NoTestRun -d ./toDeploy -u devOrg -w 10
+      displayName: Deploy source code to Dev Org
+        
+        
+      # Deploy source to org with sfdx format
+    - script: |
+        sfdx force:source:deploy --checkonly --sourcepath 'force-app/main/default' --testlevel 'NoTestRun' --targetusername 'devOrg'
+      displayName: 'Perform the validation against Prod'
+
+      # Deploy source to org
+    - script: |
+        sfdx force:source:deploy --sourcepath 'force-app/main/default' --testlevel 'NoTestRun' --targetusername 'devOrg'
+      displayName: 'Perform the Deployment'
+
+      # Run Apex tests in scratch org
+    - script: |
+        sfdx force:apex:test:run -c -r human --testlevel 'RunLocalTests' -d ./tests/apex -w 20 --targetusername 'devOrg' --codecoverage
+      displayName: 'Run Apex tests'
+            
+    # runs-security-check:
+    - script: |
+        sfdx scanner:run -c=Security -t='force-app/main/default' -f=json -v
+      displayName: 'Scan For Security Exceptions'
+
+- job: copy_files
+  displayName: Copy Files
+  dependsOn: perform_validation
+  steps:
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(system.defaultworkingdirectory)'
+        Contents: '**'
+        TargetFolder: '$(build.artifactstagingdirectory)'
+
+- job: publish_artifacts
+  displayName: Publish Build Artifacts
+  dependsOn: copy_files
+  steps:
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(build.artifactstagingdirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
